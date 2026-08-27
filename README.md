@@ -2,14 +2,20 @@
 
 Scripts that automatically move completed recordings from an HDHomeRun FLEX DVR to another storage location, such as an Emby TV library, NAS, media server, or local disk.
 
-Two equivalent implementations are included:
+Three platforms are supported:
 
 | Platform | Script | Scheduler |
 |---|---|---|
 | Windows | `HDHomeRunRecordingsSync.ps1` | Task Scheduler |
 | macOS | `hdhomerun-recordings-sync.sh` | launchd |
+| Linux | `hdhomerun-recordings-sync.sh` | systemd timer |
 
-Both follow identical logic and safety rules. Everything described below applies to both unless a section is marked otherwise.
+macOS and Linux share one script. It detects the platform at startup and
+adjusts the two commands whose options differ between BSD and GNU userland
+(`stat` and `date`); everything else is identical.
+
+All implementations follow the same logic and safety rules. Everything
+described below applies to all of them unless a section is marked otherwise.
 
 After a recording finishes, the script:
 
@@ -39,7 +45,7 @@ Common to both platforms:
 
 ### macOS
 
-- `/bin/bash` — the script targets bash 3.2, so the version macOS ships is sufficient and Homebrew bash is not required
+- `bash` — the script targets bash 3.2, so the version macOS ships is sufficient and Homebrew bash is not required
 - `curl` — included with macOS
 - `jq` — included with macOS 15 (Sequoia) and later at `/usr/bin/jq`
 
@@ -49,10 +55,27 @@ On older macOS versions, install `jq` with Homebrew:
 brew install jq
 ```
 
-Check what you have:
+### Linux
+
+- `bash`
+- `curl`
+- `jq`
+
+Install the dependencies for your distribution:
 
 ```bash
-command -v curl jq
+sudo apt install curl jq          # Debian, Ubuntu, Raspberry Pi OS
+sudo dnf install curl jq          # Fedora, RHEL, Rocky, Alma
+sudo pacman -S curl jq            # Arch
+sudo zypper install curl jq       # openSUSE
+```
+
+### Checking dependencies
+
+On either platform:
+
+```bash
+command -v bash curl jq
 ```
 
 ## Configuration
@@ -161,7 +184,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File "C:\Scripts\HDHomeRunRecordingsSync.ps1"
 ```
 
-## Running manually (macOS)
+## Running manually (macOS and Linux)
 
 Make the script executable once:
 
@@ -169,7 +192,7 @@ Make the script executable once:
 chmod +x hdhomerun-recordings-sync.sh
 ```
 
-The macOS script takes the same three settings as command-line options:
+The Unix script takes the same three settings as command-line options:
 
 | Option | Default | Equivalent PowerShell parameter |
 |---|---|---|
@@ -194,7 +217,7 @@ If the defaults already match your setup:
 
 ### Dry run
 
-The macOS script adds a `--dry-run` flag that has no PowerShell equivalent. It
+The Unix script adds a `--dry-run` flag that has no PowerShell equivalent. It
 reports every destination path it would write and every recording it would
 delete, without copying or deleting anything:
 
@@ -206,17 +229,35 @@ Running this once before the first real sync is recommended. It confirms the
 HDHomeRun is reachable, the destination is writable, and the generated folder
 and filename layout is what you expect.
 
-### Destination paths on macOS
+### Destination paths
 
-External drives and network shares appear under `/Volumes`:
+On macOS, external drives and network shares appear under `/Volumes`:
 
 ```bash
 --dest "/Volumes/Media/TV"
 ```
 
 For an SMB share, mount it in Finder first (**Go → Connect to Server**, then
-`smb://nas.local/Media`). A share that is not mounted when the script runs is
-treated as an offline destination, so nothing is copied or deleted.
+`smb://nas.local/Media`).
+
+On Linux, mount points are conventionally under `/mnt` or `/media`:
+
+```bash
+--dest "/mnt/media/TV"
+```
+
+A network share should be listed in `/etc/fstab` so it is mounted at boot
+rather than by a desktop session. On either platform, a share that is not
+mounted when the script runs is treated as an offline destination, so nothing
+is copied or deleted.
+
+### Filenames and time zones
+
+Date-based filenames are generated in the machine's **local** time, matching
+the Windows script's behavior. A recording that airs late in the evening will
+therefore produce a different filename on a machine set to UTC than on one set
+to your local zone. If two machines sync the same library, give them the same
+time zone setting.
 
 ## Folder and filename layout
 
@@ -292,16 +333,22 @@ Windows:
 logs\hdhomerun-archive.log
 ```
 
-macOS:
+macOS and Linux:
 
 ```text
 logs/hdhomerun-archive.log
 ```
 
-Follow the log live on macOS with:
+Follow the log live with:
 
 ```bash
 tail -f logs/hdhomerun-archive.log
+```
+
+On Linux, output from scheduled runs is additionally captured by the journal:
+
+```bash
+journalctl --user -u hdhomerun-sync.service -f
 ```
 
 Example:
@@ -560,6 +607,162 @@ macOS may block a background job from reading removable or network volumes
 until it is granted permission. If the script logs `OFFLINE` for a destination
 that you can browse normally in Finder, grant Full Disk Access to `/bin/bash`
 under **System Settings → Privacy & Security → Full Disk Access**.
+
+## Run automatically every 15 minutes (Linux)
+
+Most distributions use **systemd**, which splits the job into two units: a
+`.service` describing what to run, and a `.timer` describing when. This is the
+closest equivalent to a Task Scheduler task or a launchd job.
+
+A cron alternative is described at the end of this section.
+
+### The service unit
+
+Create `~/.config/systemd/user/hdhomerun-sync.service`, replacing the path and
+destination with your own:
+
+```ini
+[Unit]
+Description=HDHomeRun recording sync
+Wants=network-online.target
+After=network-online.target
+RequiresMountsFor=/mnt/media
+
+[Service]
+Type=oneshot
+ExecStart=/home/YOURNAME/scripts/hdhomerun-recordings-sync.sh --hdhomerun http://hdhomerun.local --dest /mnt/media/TV
+```
+
+`Type=oneshot` tells systemd the unit runs to completion rather than staying
+resident, which is what a periodic sync does.
+
+`RequiresMountsFor=` is worth setting when the destination is a network share
+or external disk. systemd will not start the job until that path is actually
+mounted, which avoids a run that would only log `OFFLINE` and exit.
+
+Unlike launchd, arguments are written as a normal command line here, so a
+destination containing spaces needs quoting.
+
+### The timer unit
+
+Create `~/.config/systemd/user/hdhomerun-sync.timer`:
+
+```ini
+[Unit]
+Description=Run HDHomeRun recording sync every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+Unit=hdhomerun-sync.service
+
+[Install]
+WantedBy=timers.target
+```
+
+`OnUnitActiveSec=15min` measures from the end of the previous run, so a long
+copy never causes runs to stack up.
+
+`Persistent=true` runs the job once after a missed window — for example when
+the machine was powered off. It is the equivalent of Task Scheduler's **Run
+task as soon as possible after a scheduled start is missed**.
+
+### Enabling the timer
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now hdhomerun-sync.timer
+```
+
+Run the sync once immediately to confirm it works, without waiting for the
+timer:
+
+```bash
+systemctl --user start hdhomerun-sync.service
+```
+
+### Checking status
+
+```bash
+systemctl --user list-timers hdhomerun-sync.timer
+systemctl --user status hdhomerun-sync.service
+```
+
+Script output is captured by the journal in addition to the script's own log
+file:
+
+```bash
+journalctl --user -u hdhomerun-sync.service -f
+```
+
+### Editing or removing the units
+
+systemd caches unit files, so **any edit requires a `daemon-reload`**:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user restart hdhomerun-sync.timer
+```
+
+To remove it:
+
+```bash
+systemctl --user disable --now hdhomerun-sync.timer
+rm ~/.config/systemd/user/hdhomerun-sync.{service,timer}
+systemctl --user daemon-reload
+```
+
+### Prevent overlapping copies
+
+No configuration is needed. systemd will not start a second instance of a
+service that is still running, and the timer simply skips that window. This is
+the equivalent of Task Scheduler's:
+
+```text
+If the task is already running:
+Do not start a new instance
+```
+
+The script's own lock in `logs/.sync.lock` provides the same second layer as on
+macOS, covering a manual run that overlaps a scheduled one.
+
+### Running without a logged-in session
+
+A user unit stops when your session ends. For a headless server or NAS that
+should archive continuously, enable lingering so your user's units run from
+boot:
+
+```bash
+sudo loginctl enable-linger YOURNAME
+```
+
+Alternatively, install the units system-wide in `/etc/systemd/system/` and add
+a `User=` line to the `[Service]` section. Drop `--user` from every command
+above. This is the same trade-off as a launchd LaunchDaemon on macOS, or
+Windows' "Run only when user is logged on" — and it carries the same caveat
+that a share mounted by your desktop session will not be visible to a
+system-wide unit.
+
+### Using cron instead
+
+If you prefer cron, or are on a system without systemd, run `crontab -e` and
+add:
+
+```cron
+*/15 * * * * /home/YOURNAME/scripts/hdhomerun-recordings-sync.sh --dest /mnt/media/TV >/dev/null 2>&1
+```
+
+Two caveats apply. cron does not read your shell profile, so if `jq` lives
+somewhere outside cron's minimal `PATH`, set it at the top of the crontab:
+
+```cron
+PATH=/usr/local/bin:/usr/bin:/bin
+```
+
+And cron has no concept of a job already running, so overlap protection rests
+entirely on the script's own lock file. The script handles this correctly, but
+systemd is the better choice where it is available.
 
 ## How HDHomeRun access works
 

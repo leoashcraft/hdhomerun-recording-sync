@@ -1,15 +1,15 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
-# HDHomeRun Recording Sync - macOS version
+# HDHomeRun Recording Sync - macOS and Linux version
 #
 # Moves completed recordings off an HDHomeRun FLEX DVR to another storage
 # location, then deletes the source only after the copy is verified.
 #
-# macOS port of HDHomeRunRecordingsSync.ps1. Behavior is intentionally
+# Unix port of HDHomeRunRecordingsSync.ps1. Behavior is intentionally
 # identical; see README.md for details.
 #
-# Written for /bin/bash 3.2 (the version macOS ships) so it runs with no
-# Homebrew bash required.
+# Written for bash 3.2 (the version macOS ships) so it runs unmodified on
+# macOS and on Linux, where bash is normally much newer.
 
 SCRIPT_VERSION="1.0.0"
 
@@ -104,6 +104,29 @@ unix_time() {
     date '+%s'
 }
 
+# stat and date take incompatible flags in BSD userland (macOS) and GNU
+# userland (Linux), so the two calls that need them are wrapped here.
+case "$(uname -s)" in
+    Darwin|*BSD*) PLATFORM="bsd" ;;
+    *)            PLATFORM="gnu" ;;
+esac
+
+file_size() {
+    if [ "$PLATFORM" = "bsd" ]; then
+        stat -f%z "$1"
+    else
+        stat -c%s "$1"
+    fi
+}
+
+epoch_to_date() {
+    if [ "$PLATFORM" = "bsd" ]; then
+        date -r "$1" '+%Y-%m-%d' 2>/dev/null
+    else
+        date -d "@$1" '+%Y-%m-%d' 2>/dev/null
+    fi
+}
+
 is_positive_int() {
     case "$1" in
         ''|*[!0-9]*) return 1 ;;
@@ -141,10 +164,10 @@ episode_destination() {
 
     air_date=""
     if is_positive_int "$original_airdate"; then
-        air_date="$(date -r "$original_airdate" '+%Y-%m-%d' 2>/dev/null)"
+        air_date="$(epoch_to_date "$original_airdate")"
     fi
     if [ -z "$air_date" ] && is_positive_int "$start_time"; then
-        air_date="$(date -r "$start_time" '+%Y-%m-%d' 2>/dev/null)"
+        air_date="$(epoch_to_date "$start_time")"
     fi
 
     if [ -n "$air_date" ]; then
@@ -216,7 +239,7 @@ download_recording() {
         return 1
     fi
 
-    size="$(stat -f%z "$partial")"
+    size="$(file_size "$partial")"
 
     if [ "$size" -lt "$MIN_RECORDING_BYTES" ]; then
         log "ERROR: Downloaded file is suspiciously small ($size bytes). Source retained."
@@ -234,7 +257,7 @@ download_recording() {
         return 1
     fi
 
-    final_size="$(stat -f%z "$destination")"
+    final_size="$(file_size "$destination")"
 
     if [ "$final_size" != "$size" ]; then
         log "ERROR: Final size mismatch ($final_size vs $size). Source retained."
