@@ -848,3 +848,7 @@ Emby library
 ```
 
 The HDHomeRun USB drive acts as temporary storage, while the Emby server becomes the long-term archive.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
