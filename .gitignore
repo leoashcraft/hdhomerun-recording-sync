@@ -1,0 +1,23 @@
+# Script output — Write-Log writes to $PSScriptRoot/logs
+logs/
+*.log
+
+# Write-permission probe files
+.hdhomerun_write_test_*.tmp
+*.tmp
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows (script's target platform)
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# Editors
+.vscode/
+.idea/
+*.swp
