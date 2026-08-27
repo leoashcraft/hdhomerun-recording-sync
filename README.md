@@ -1,6 +1,15 @@
 # HDHomeRun Recording Sync
 
-A small PowerShell script for Windows that automatically moves completed recordings from an HDHomeRun FLEX DVR to another storage location, such as an Emby TV library, NAS, media server, or local disk.
+Scripts that automatically move completed recordings from an HDHomeRun FLEX DVR to another storage location, such as an Emby TV library, NAS, media server, or local disk.
+
+Two equivalent implementations are included:
+
+| Platform | Script | Scheduler |
+|---|---|---|
+| Windows | `HDHomeRunRecordingsSync.ps1` | Task Scheduler |
+| macOS | `hdhomerun-recordings-sync.sh` | launchd |
+
+Both follow identical logic and safety rules. Everything described below applies to both unless a section is marked otherwise.
 
 After a recording finishes, the script:
 
@@ -16,16 +25,41 @@ This makes the HDHomeRun's attached USB storage useful as a temporary DVR buffer
 
 ## Requirements
 
+Common to both platforms:
+
+- An HDHomeRun model with DVR storage available through `recorded_files.json`
+- A writable destination folder
+- The computer and HDHomeRun must be able to reach each other over the network
+
+### Windows
+
 - Windows with Windows PowerShell or PowerShell
 - `curl.exe` available in PATH
   - Included with current versions of Windows 10 and Windows 11
-- An HDHomeRun model with DVR storage available through `recorded_files.json`
-- A writable destination folder
-- The Windows computer and HDHomeRun must be able to reach each other over the network
+
+### macOS
+
+- `/bin/bash` — the script targets bash 3.2, so the version macOS ships is sufficient and Homebrew bash is not required
+- `curl` — included with macOS
+- `jq` — included with macOS 15 (Sequoia) and later at `/usr/bin/jq`
+
+On older macOS versions, install `jq` with Homebrew:
+
+```bash
+brew install jq
+```
+
+Check what you have:
+
+```bash
+command -v curl jq
+```
 
 ## Configuration
 
-The script accepts three parameters:
+Both scripts accept the same three settings.
+
+Windows, as PowerShell parameters:
 
 ```powershell
 param(
@@ -34,6 +68,17 @@ param(
     [int]$CompletionBufferSeconds = 90
 )
 ```
+
+macOS, as command-line options:
+
+```bash
+--hdhomerun "http://hdhomerun.local"   # HDHomeRun base URL
+--dest      "$HOME/Media/TV"           # Destination root
+--buffer    90                         # Completion buffer, seconds
+```
+
+The defaults differ only in the destination, which follows each platform's
+conventions.
 
 ### HDHomeRun address
 
@@ -49,7 +94,17 @@ If name resolution does not work on your network, use the HDHomeRun's IP address
 -HdHomeRun "http://192.168.1.50"
 ```
 
+```bash
+--hdhomerun "http://192.168.1.50"
+```
+
 A static DHCP reservation is recommended if you use an IP address.
+
+On macOS you can confirm the HDHomeRun is reachable with:
+
+```bash
+curl -fsS http://hdhomerun.local/discover.json
+```
 
 ### Destination
 
@@ -73,7 +128,22 @@ For unattended scheduled tasks, a UNC path is generally more reliable than a map
 
 Mapped drives such as `V:` are associated with a Windows login session and may not be visible when Task Scheduler runs under a different account or security context.
 
-## Running manually
+On macOS the default destination is:
+
+```text
+$HOME/Media/TV
+```
+
+Override it with:
+
+```bash
+--dest "/Volumes/Media/TV"
+```
+
+The same caveat applies: an SMB share mounted in Finder belongs to your login
+session and is not visible to a LaunchDaemon running as root.
+
+## Running manually (Windows)
 
 Example:
 
@@ -90,6 +160,63 @@ If the defaults already match your setup:
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File "C:\Scripts\HDHomeRunRecordingsSync.ps1"
 ```
+
+## Running manually (macOS)
+
+Make the script executable once:
+
+```bash
+chmod +x hdhomerun-recordings-sync.sh
+```
+
+The macOS script takes the same three settings as command-line options:
+
+| Option | Default | Equivalent PowerShell parameter |
+|---|---|---|
+| `--hdhomerun URL` | `http://hdhomerun.local` | `-HdHomeRun` |
+| `--dest PATH` | `$HOME/Media/TV` | `-DestinationRoot` |
+| `--buffer SECONDS` | `90` | `-CompletionBufferSeconds` |
+| `--dry-run` | off | *(no equivalent)* |
+
+Example:
+
+```bash
+./hdhomerun-recordings-sync.sh \
+  --hdhomerun "http://192.168.1.50" \
+  --dest "/Volumes/Media/TV"
+```
+
+If the defaults already match your setup:
+
+```bash
+./hdhomerun-recordings-sync.sh
+```
+
+### Dry run
+
+The macOS script adds a `--dry-run` flag that has no PowerShell equivalent. It
+reports every destination path it would write and every recording it would
+delete, without copying or deleting anything:
+
+```bash
+./hdhomerun-recordings-sync.sh --dest "/Volumes/Media/TV" --dry-run
+```
+
+Running this once before the first real sync is recommended. It confirms the
+HDHomeRun is reachable, the destination is writable, and the generated folder
+and filename layout is what you expect.
+
+### Destination paths on macOS
+
+External drives and network shares appear under `/Volumes`:
+
+```bash
+--dest "/Volumes/Media/TV"
+```
+
+For an SMB share, mount it in Finder first (**Go → Connect to Server**, then
+`smb://nas.local/Media`). A share that is not mounted when the script runs is
+treated as an offline destination, so nothing is copied or deleted.
 
 ## Folder and filename layout
 
@@ -157,10 +284,24 @@ This is useful when the archive location is a NAS, removable disk, mapped drive,
 
 ## Logs
 
-Logs are stored relative to the script:
+Logs are stored relative to the script.
+
+Windows:
 
 ```text
 logs\hdhomerun-archive.log
+```
+
+macOS:
+
+```text
+logs/hdhomerun-archive.log
+```
+
+Follow the log live on macOS with:
+
+```bash
+tail -f logs/hdhomerun-archive.log
 ```
 
 Example:
@@ -177,7 +318,7 @@ Example:
 2026-08-27 16:46:42  ----- Scan finished -----
 ```
 
-## Run automatically every 15 minutes
+## Run automatically every 15 minutes (Windows)
 
 Windows Task Scheduler works well for this.
 
@@ -244,6 +385,181 @@ Do not start a new instance
 ```
 
 This prevents a second copy operation from starting if a large recording takes longer than 15 minutes to transfer.
+
+## Run automatically every 15 minutes (macOS)
+
+macOS uses **launchd** rather than cron. A LaunchAgent is the closest
+equivalent to a Task Scheduler task.
+
+### General
+
+Create the file:
+
+```text
+~/Library/LaunchAgents/local.hdhomerun-sync.plist
+```
+
+The `Label` inside the file must match the filename, or the job will fail to
+load. launchd job labels share a single flat, machine-wide namespace, so the
+reverse-DNS style shown here is the convention for avoiding collisions. The
+`local.` prefix claims no domain; if you own one, `tech.example.hdhomerun-sync`
+is equally valid. The label is also how you address the job in every
+`launchctl` command below.
+
+Create the log directory first — launchd opens its log files *before* running
+the script, and the job fails to start if the directory does not yet exist:
+
+```bash
+mkdir -p ~/Scripts/logs
+```
+
+### The job definition
+
+Replace `YOURNAME` and the two paths to match your setup:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>local.hdhomerun-sync</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/YOURNAME/Scripts/hdhomerun-recordings-sync.sh</string>
+        <string>--hdhomerun</string>
+        <string>http://hdhomerun.local</string>
+        <string>--dest</string>
+        <string>/Volumes/Media/TV</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOURNAME/Scripts/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOURNAME/Scripts/logs/launchd.err.log</string>
+</dict>
+</plist>
+```
+
+Each argument must be its own `<string>` element. Unlike Task Scheduler's
+single **Arguments** field, launchd does not split a string on spaces, so a
+destination containing spaces needs no quoting here.
+
+`StartInterval` is expressed in seconds, so 15 minutes is `900`.
+
+The explicit `PATH` matters because launchd does **not** read your shell
+profile. A job inherits a minimal environment, so a `jq` installed by Homebrew
+into `/opt/homebrew/bin` would otherwise not be found. The script reports this
+clearly if it happens:
+
+```text
+FATAL: Required tool 'jq' not found in PATH.
+```
+
+### Loading the job
+
+Check the file parses, then load and start it:
+
+```bash
+plutil -lint ~/Library/LaunchAgents/local.hdhomerun-sync.plist
+
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.hdhomerun-sync.plist
+launchctl enable  gui/$(id -u)/local.hdhomerun-sync
+```
+
+Because `RunAtLoad` is `false`, the first run happens 15 minutes later. Trigger
+one immediately to confirm it works:
+
+```bash
+launchctl kickstart gui/$(id -u)/local.hdhomerun-sync
+```
+
+Then watch the result:
+
+```bash
+tail -f ~/Scripts/logs/hdhomerun-archive.log
+```
+
+### Checking status
+
+```bash
+launchctl print gui/$(id -u)/local.hdhomerun-sync
+```
+
+The `last exit code` field in that output is the quickest way to confirm the
+job is running cleanly.
+
+### Editing or removing the job
+
+launchd caches the job definition, so **any edit to the plist requires an
+unload and reload** — saving the file alone changes nothing:
+
+```bash
+launchctl bootout gui/$(id -u)/local.hdhomerun-sync
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.hdhomerun-sync.plist
+```
+
+To remove it permanently, `bootout` it and delete the plist.
+
+### Prevent overlapping copies
+
+No configuration is needed. launchd will not start a second instance of a job
+that is still running, which is the equivalent of Task Scheduler's:
+
+```text
+If the task is already running:
+Do not start a new instance
+```
+
+As a second layer, the script takes its own lock in `logs/.sync.lock` and exits
+early if another run holds it. This also covers a manual run overlapping a
+scheduled one:
+
+```text
+SKIP: Another sync is already running (pid 4812).
+```
+
+A lock left behind by a killed process is detected and reclaimed automatically.
+
+### Sleep and missed runs
+
+A LaunchAgent runs only while you are logged in, and a sleeping Mac runs
+nothing. When the machine wakes, launchd runs a missed `StartInterval` job once
+— it does not replay every interval that elapsed. This is the practical
+equivalent of Task Scheduler's:
+
+```text
+Run task as soon as possible after a scheduled start is missed
+```
+
+For a Mac that should archive around the clock, either disable sleep for the
+machine, or install the job as a **LaunchDaemon** in `/Library/LaunchDaemons`
+instead. A daemon runs as root at boot without anyone logged in, which is the
+counterpart to the Windows "Run only when user is logged on" trade-off. Note
+that a daemon cannot see SMB shares you mounted in Finder, since those belong
+to your login session — the same caveat as mapped drive letters on Windows.
+
+### If the destination is an external or network volume
+
+macOS may block a background job from reading removable or network volumes
+until it is granted permission. If the script logs `OFFLINE` for a destination
+that you can browse normally in Finder, grant Full Disk Access to `/bin/bash`
+under **System Settings → Privacy & Security → Full Disk Access**.
 
 ## How HDHomeRun access works
 
